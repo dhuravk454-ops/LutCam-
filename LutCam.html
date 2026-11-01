@@ -1,0 +1,169 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>LutCam</title>
+<style>
+:root{--bg:#f3f1ee;--fg:#1b1a18;--card:#e4e0da;--acc:#c46a00;--accfg:#fff;box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px);color-scheme:light}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#121110;--fg:#f1ede6;--card:#2a2825;--acc:#ffb347;--accfg:#1b1a18;color-scheme:dark}}
+:root[data-theme="dark"]{--bg:#121110;--fg:#f1ede6;--card:#2a2825;--acc:#ffb347;--accfg:#1b1a18;color-scheme:dark}
+html,body{height:100%;margin:0;background:var(--bg);color:var(--fg);font:14px/1.3 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;overscroll-behavior:none}
+#app{height:100%;display:flex;flex-direction:column}
+#stage{flex:1;min-height:0;background:#000;position:relative}
+#cv{width:100%;height:100%;object-fit:contain;display:block}
+#msg{position:absolute;inset:auto 12px 12px;color:#fff;background:#000a;border-radius:10px;padding:8px 10px;display:none}
+#panel{padding:8px 10px 10px;display:flex;flex-direction:column;gap:8px}
+.row{display:flex;align-items:center;gap:6px}
+#chips{display:flex;gap:6px;overflow-x:auto;padding-bottom:2px;scrollbar-width:none}
+button,.chip{font:inherit;color:var(--fg);background:var(--card);border:0;border-radius:12px;padding:9px 12px;white-space:nowrap;min-height:40px}
+button.on,.chip.on{background:var(--acc);color:var(--accfg)}
+.row button{flex:1;padding:8px 4px}
+#shot{flex:0 0 68px;height:68px;border-radius:50%;background:#fff;border:4px solid var(--acc);padding:0}
+input[type=range]{flex:1;accent-color:var(--acc)}
+#mgr{display:none}
+dialog{border:0;border-radius:16px;background:var(--bg);color:var(--fg);padding:12px;max-width:94vw;max-height:90%}
+dialog img,dialog video{max-width:100%;max-height:60vh;display:block;border-radius:10px;touch-action:none;-webkit-user-select:none;user-select:none}
+dialog::backdrop{background:#000b}
+</style>
+</head>
+<body>
+<div id="app">
+ <div id="stage"><canvas id="cv"></canvas><div id="msg"></div></div>
+ <div id="panel">
+  <div class="row"><span>Intensity</span><input type="range" id="sl" min="0" max="100" value="100"><span id="pc">100%</span></div>
+  <div id="chips"></div>
+  <div class="row" id="mgr"><button id="ren">Rename</button><button id="del">Delete</button><button id="sav">Save to my filters</button></div>
+  <div class="row">
+   <button id="imp">Import filter</button><button id="flash">Flash off</button>
+   <button id="shot" aria-label="Take photo"></button>
+   <button id="cmp">Hold: original</button><button id="flip">Flip</button>
+  </div>
+  <div class="row"><button id="rec">Record video</button></div>
+ </div>
+</div>
+<input type="file" id="file" accept=".cube,.3dl,.png,.jpg,.jpeg,image/*" multiple hidden>
+<dialog id="dlg"><div id="out"></div><div class="row" style="margin-top:8px"><button id="dsave">Save</button><button id="dshare">Share</button><button id="dclose">Close</button></div><p id="dhint" style="margin:6px 0 0;opacity:.7"></p></dialog>
+<script>
+const $=s=>document.querySelector(s);
+const cv=$('#cv'),gl=cv.getContext('webgl',{preserveDrawingBuffer:true,antialias:false});
+const vid=document.createElement('video');vid.playsInline=true;vid.muted=true;
+let stream=null,facing='environment',level=1,hold=false,sel='none',mirror=false,canTorch=false,flashOn=false;
+let custom=[];try{custom=JSON.parse(localStorage.getItem('lutcam')||'[]')}catch(e){}
+const msg=t=>{const m=$('#msg');m.textContent=t;m.style.display=t?'block':'none';if(t)setTimeout(()=>{if(m.textContent===t)m.style.display='none'},4000)};
+
+/* ---------- LUT data: {n, d:Uint8Array RGB, red fastest} ---------- */
+const q=v=>Math.max(0,Math.min(255,Math.round(v*255)));
+function fromFloats(n,f){const d=new Uint8Array(f.length);for(let i=0;i<f.length;i++)d[i]=q(f[i]);return{n,d}}
+function parseCube(t){let n=0,f=null,i=0;for(const raw of t.split(/\r?\n/)){const l=raw.trim();if(!l||l[0]==='#')continue;
+ if(l.startsWith('LUT_3D_SIZE')){n=parseInt(l.split(/\s+/)[1]);f=new Float32Array(n*n*n*3);continue}
+ const p=l.split(/\s+/);if(f&&p.length===3&&/^[-.\d]/.test(p[0])&&i+3<=f.length){f[i++]=+p[0];f[i++]=+p[1];f[i++]=+p[2]}}
+ return n>1&&f&&i===f.length?fromFloats(n,f):null}
+function parse3dl(t){const v=[];for(const raw of t.split(/\r?\n/)){const p=raw.trim().split(/\s+/);if(p.length===3&&/^[-.\d]/.test(p[0]))v.push(p.map(Number))}
+ const n=Math.round(Math.cbrt(v.length));if(n<2||n*n*n!==v.length)return null;
+ let mx=0;v.forEach(a=>a.forEach(c=>mx=Math.max(mx,c)));const k=mx<=1.5?1:mx<=1023?1023:mx<=4095?4095:65535;
+ const f=new Float32Array(v.length*3);for(let r=0;r<n;r++)for(let g=0;g<n;g++)for(let b=0;b<n;b++){const a=v[(r*n+g)*n+b],o=((b*n+g)*n+r)*3;f[o]=a[0]/k;f[o+1]=a[1]/k;f[o+2]=a[2]/k}
+ return fromFloats(n,f)}
+async function parseImg(file){const bm=await createImageBitmap(file),w=bm.width,h=bm.height,c=document.createElement('canvas');c.width=w;c.height=h;
+ const x=c.getContext('2d');x.drawImage(bm,0,0);const px=x.getImageData(0,0,w,h).data;let n,d;
+ if(w===h*h){n=h;d=new Uint8Array(n*n*n*3);for(let b=0;b<n;b++)for(let g=0;g<n;g++)for(let r=0;r<n;r++){const s=(g*w+b*n+r)*4,o=((b*n+g)*n+r)*3;d[o]=px[s];d[o+1]=px[s+1];d[o+2]=px[s+2]}}
+ else if(w===h){const L=Math.round(Math.cbrt(w));if(L*L*L!==w)return null;n=L*L;d=new Uint8Array(n*n*n*3);for(let k=0;k<n*n*n;k++){d[k*3]=px[k*4];d[k*3+1]=px[k*4+1];d[k*3+2]=px[k*4+2]}}
+ else return null;return{n,d}}
+function preset(name){const n=17,f=new Float32Array(n*n*n*3);
+ for(let b=0;b<n;b++)for(let g=0;g<n;g++)for(let r=0;r<n;r++){let R=r/(n-1),G=g/(n-1),B=b/(n-1);const l=.299*R+.587*G+.114*B;
+  const sat=(c,s)=>l+(c-l)*s;
+  if(name==='Vivid'){R=(sat(R,1.4)-.5)*1.08+.5;G=(sat(G,1.4)-.5)*1.08+.5;B=(sat(B,1.4)-.5)*1.08+.5}
+  else if(name==='Warm'){R*=1.08;B*=.88}else if(name==='Cool'){R*=.9;B*=1.08}else if(name==='B&W'){R=G=B=l}
+  else if(name==='Fade'){R=.08+sat(R,.8)*.88;G=.08+sat(G,.8)*.88;B=.08+sat(B,.8)*.88}
+  else if(name==='Cinema'){R=(R-.5)*1.1+.5+(l-.5)*.14;G=(G-.5)*1.1+.5;B=(B-.5)*1.1+.5-(l-.5)*.14}
+  const o=((b*n+g)*n+r)*3;f[o]=R;f[o+1]=G;f[o+2]=B}
+ return fromFloats(n,f)}
+const PRESETS=['Vivid','Warm','Cool','B&W','Fade','Cinema'];
+function current(){if(sel==='none')return null;if(sel.startsWith('p:'))return preset(sel.slice(2));const c=custom.find(x=>x.id===sel);return c?{n:c.n,d:b64d(c.b)}:null}
+function b64e(u){let s='';for(let i=0;i<u.length;i+=8192)s+=String.fromCharCode.apply(null,u.subarray(i,i+8192));return btoa(s)}
+function b64d(s){const t=atob(s),u=new Uint8Array(t.length);for(let i=0;i<t.length;i++)u[i]=t.charCodeAt(i);return u}
+function persist(){try{localStorage.setItem('lutcam',JSON.stringify(custom))}catch(e){msg('Storage is full. This filter will work only until you close the page.')}}
+
+/* ---------- WebGL ---------- */
+const VS='attribute vec2 p;varying vec2 t;uniform float mx;void main(){float x=p.x*.5+.5;t=vec2(mx>.5?1.-x:x,p.y*.5+.5);gl_Position=vec4(p,0,1);}';
+const FS='precision highp float;varying vec2 t;uniform sampler2D cam,lut;uniform float n,k;vec3 look(vec3 c){float m=n-1.,bf=c.b*m,b0=floor(bf),b1=min(b0+1.,m),f=bf-b0,v=(c.g*m+.5)/n,w=n*n;return mix(texture2D(lut,vec2((b0*n+c.r*m+.5)/w,v)).rgb,texture2D(lut,vec2((b1*n+c.r*m+.5)/w,v)).rgb,f);}void main(){vec3 c=texture2D(cam,t).rgb;gl_FragColor=vec4(mix(c,look(c),k),1.);}';
+const sh=(ty,s)=>{const o=gl.createShader(ty);gl.shaderSource(o,s);gl.compileShader(o);return o};
+const pr=gl.createProgram();gl.attachShader(pr,sh(gl.VERTEX_SHADER,VS));gl.attachShader(pr,sh(gl.FRAGMENT_SHADER,FS));gl.linkProgram(pr);gl.useProgram(pr);
+const buf=gl.createBuffer();gl.bindBuffer(gl.ARRAY_BUFFER,buf);gl.bufferData(gl.ARRAY_BUFFER,new Float32Array([-1,-1,1,-1,-1,1,1,1]),gl.STATIC_DRAW);
+const ap=gl.getAttribLocation(pr,'p');gl.enableVertexAttribArray(ap);gl.vertexAttribPointer(ap,2,gl.FLOAT,false,0,0);
+const U=k=>gl.getUniformLocation(pr,k);
+function tex(unit){const t=gl.createTexture();gl.activeTexture(gl.TEXTURE0+unit);gl.bindTexture(gl.TEXTURE_2D,t);
+ for(const[k,v]of[[gl.TEXTURE_MIN_FILTER,gl.LINEAR],[gl.TEXTURE_MAG_FILTER,gl.LINEAR],[gl.TEXTURE_WRAP_S,gl.CLAMP_TO_EDGE],[gl.TEXTURE_WRAP_T,gl.CLAMP_TO_EDGE]])gl.texParameteri(gl.TEXTURE_2D,k,v);return t}
+const camTex=tex(0),lutTex=tex(1);gl.uniform1i(U('cam'),0);gl.uniform1i(U('lut'),1);
+let lutN=1;
+function setLut(l){gl.activeTexture(gl.TEXTURE1);gl.bindTexture(gl.TEXTURE_2D,lutTex);gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL,false);gl.pixelStorei(gl.UNPACK_ALIGNMENT,1);
+ if(!l){lutN=1;gl.texImage2D(gl.TEXTURE_2D,0,gl.RGB,1,1,0,gl.RGB,gl.UNSIGNED_BYTE,new Uint8Array(3));return}
+ const n=l.n,s=new Uint8Array(n*n*n*3);for(let g=0;g<n;g++)for(let b=0;b<n;b++)for(let r=0;r<n;r++){const a=((b*n+g)*n+r)*3,o=(g*n*n+b*n+r)*3;s[o]=l.d[a];s[o+1]=l.d[a+1];s[o+2]=l.d[a+2]}
+ lutN=n;gl.texImage2D(gl.TEXTURE_2D,0,gl.RGB,n*n,n,0,gl.RGB,gl.UNSIGNED_BYTE,s)}
+function render(k){if(vid.readyState<2||!vid.videoWidth)return false;
+ if(cv.width!==vid.videoWidth||cv.height!==vid.videoHeight){cv.width=vid.videoWidth;cv.height=vid.videoHeight}
+ gl.viewport(0,0,cv.width,cv.height);gl.activeTexture(gl.TEXTURE0);gl.bindTexture(gl.TEXTURE_2D,camTex);gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL,true);
+ gl.texImage2D(gl.TEXTURE_2D,0,gl.RGB,gl.RGB,gl.UNSIGNED_BYTE,vid);
+ gl.uniform1f(U('n'),lutN);gl.uniform1f(U('k'),lutN>1?k:0);gl.uniform1f(U('mx'),mirror?1:0);gl.drawArrays(gl.TRIANGLE_STRIP,0,4);return true}
+(function loop(){render(hold?0:level);requestAnimationFrame(loop)})();
+
+/* ---------- Camera ---------- */
+async function startCam(){if(stream)stream.getTracks().forEach(t=>t.stop());flashOn=false;$('#flash').textContent='Flash off';$('#flash').classList.remove('on');
+ try{stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:{ideal:facing},width:{ideal:1920},height:{ideal:1080}},audio:false});
+  vid.srcObject=stream;await vid.play();mirror=facing==='user';
+  const c=stream.getVideoTracks()[0].getCapabilities?.();canTorch=!!c&&'torch'in c;msg('')}
+ catch(e){msg('Camera unavailable ('+e.name+'). Allow camera access, or open this page’s link directly in Chrome.')}}
+$('#flip').onclick=()=>{facing=facing==='user'?'environment':'user';startCam()};
+$('#flash').onclick=async()=>{if(!canTorch){msg('This camera doesn’t allow flash from the browser.');return}
+ flashOn=!flashOn;try{await stream.getVideoTracks()[0].applyConstraints({advanced:[{torch:flashOn}]})}catch(e){flashOn=false;msg('Flash failed.')}
+ $('#flash').textContent=flashOn?'Flash on':'Flash off';$('#flash').classList.toggle('on',flashOn)};
+
+/* ---------- Filters UI ---------- */
+function chips(){const c=$('#chips');c.innerHTML='';
+ const add=(id,t)=>{const b=document.createElement('button');b.className='chip'+(sel===id?' on':'');b.textContent=t;b.onclick=()=>pick(id);c.appendChild(b)};
+ add('none','None');PRESETS.forEach(p=>add('p:'+p,'★ '+p));custom.forEach(f=>add(f.id,f.name));
+ const m=$('#mgr');m.style.display=sel==='none'?'none':'flex';const isP=sel.startsWith('p:');
+ $('#ren').style.display=$('#del').style.display=isP?'none':'';$('#sav').style.display=isP?'':'none'}
+function pick(id){sel=id;setLut(current());chips()}
+$('#sl').oninput=e=>{level=e.target.value/100;$('#pc').textContent=e.target.value+'%'};
+const holdOn=e=>{e.preventDefault();hold=true},holdOff=()=>{hold=false};
+$('#cmp').addEventListener('pointerdown',holdOn);['pointerup','pointercancel','pointerleave'].forEach(ev=>$('#cmp').addEventListener(ev,holdOff));
+$('#imp').onclick=()=>$('#file').click();
+$('#file').onchange=async e=>{let ok=0,bad=0;
+ for(const f of e.target.files){const ext=f.name.split('.').pop().toLowerCase(),name=f.name.replace(/\.[^.]+$/,'');let l=null;
+  try{if(ext==='cube')l=parseCube(await f.text());else if(ext==='3dl')l=parse3dl(await f.text());else l=await parseImg(f)}catch(x){}
+  if(l){const id='c'+Date.now()+ok;custom.push({id,name,n:l.n,b:b64e(l.d)});ok++;sel=id}else bad++}
+ e.target.value='';persist();setLut(current());chips();msg('Imported '+ok+' filter'+(ok===1?'':'s')+(bad?', '+bad+' not a valid LUT':''))};
+$('#ren').onclick=()=>{const c=custom.find(x=>x.id===sel);if(!c)return;const n=prompt('New name',c.name);if(n&&n.trim()){c.name=n.trim();persist();chips()}};
+$('#del').onclick=()=>{const c=custom.find(x=>x.id===sel);if(!c||!confirm('Delete “'+c.name+'”?'))return;custom=custom.filter(x=>x!==c);persist();pick('none')};
+$('#sav').onclick=()=>{const n=sel.slice(2),l=preset(n),id='c'+Date.now();custom.push({id,name:n+' (mine)',n:l.n,b:b64e(l.d)});persist();pick(id)};
+
+/* ---------- Photo, video, results ---------- */
+let result=null,urls={};
+function show(kind,blob,orig){const out=$('#out');out.innerHTML='';const url=URL.createObjectURL(blob);result={blob,name:'LutCam_'+Date.now()+(kind==='photo'?'.jpg':blob.type.includes('mp4')?'.mp4':'.webm')};
+ let el;if(kind==='photo'){el=new Image();el.src=url;if(orig){const ou=URL.createObjectURL(orig);const on=e=>{e.preventDefault();el.src=ou},off=()=>{el.src=url};
+  el.addEventListener('pointerdown',on);['pointerup','pointercancel','pointerleave'].forEach(v=>el.addEventListener(v,off))}}
+ else{el=document.createElement('video');el.src=url;el.controls=true;el.playsInline=true}
+ out.appendChild(el);$('#dhint').textContent=kind==='photo'&&orig?'Hold the photo to see the original.':'';$('#dlg').showModal()}
+$('#dclose').onclick=()=>$('#dlg').close();
+$('#dsave').onclick=()=>{const a=document.createElement('a');a.href=URL.createObjectURL(result.blob);a.download=result.name;a.click()};
+$('#dshare').onclick=async()=>{const f=new File([result.blob],result.name,{type:result.blob.type});
+ try{if(navigator.canShare&&navigator.canShare({files:[f]}))await navigator.share({files:[f]});else msg('Sharing isn’t available here. Use Save.')}catch(e){}};
+const blob=(c,t,qu)=>new Promise(r=>c.toBlob(r,t,qu));
+$('#shot').onclick=async()=>{if(!render(level)){msg('Camera isn’t ready yet.');return}
+ const f=await blob(cv,'image/jpeg',.95),o=document.createElement('canvas');o.width=cv.width;o.height=cv.height;const x=o.getContext('2d');
+ if(mirror){x.translate(o.width,0);x.scale(-1,1)}x.drawImage(vid,0,0);const og=await blob(o,'image/jpeg',.95);
+ show('photo',f,sel==='none'?null:og)};
+let mr=null,chunks=[],mic=null;
+$('#rec').onclick=async()=>{if(mr&&mr.state==='recording'){mr.stop();return}
+ if(typeof MediaRecorder==='undefined'||!cv.captureStream){msg('Video recording isn’t supported in this browser.');return}
+ const out=cv.captureStream(30);try{mic=await navigator.mediaDevices.getUserMedia({audio:true});mic.getAudioTracks().forEach(t=>out.addTrack(t))}catch(e){mic=null}
+ const mime=['video/mp4','video/webm;codecs=vp9','video/webm'].find(m=>MediaRecorder.isTypeSupported(m));
+ mr=new MediaRecorder(out,mime?{mimeType:mime,videoBitsPerSecond:8e6}:{});chunks=[];mr.ondataavailable=e=>e.data.size&&chunks.push(e.data);
+ mr.onstop=()=>{if(mic)mic.getTracks().forEach(t=>t.stop());$('#rec').textContent='Record video';$('#rec').classList.remove('on');show('video',new Blob(chunks,{type:mr.mimeType||'video/webm'}))};
+ mr.start();$('#rec').textContent='Stop recording';$('#rec').classList.add('on')};
+
+chips();startCam();
+</script>
+</body>
+</html>
